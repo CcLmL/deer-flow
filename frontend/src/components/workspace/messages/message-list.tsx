@@ -41,6 +41,7 @@ import {
   type HumanInputRequest,
   type HumanInputResponse,
 } from "@/core/messages/human-input";
+import { getRunScopedAnchorGroupIndices } from "@/core/messages/run-anchor";
 import {
   getMessageRunId,
   getRunDurationDisplaysByGroupIndex,
@@ -65,7 +66,6 @@ import {
   isHiddenFromUIMessage,
   type MessageGroup as ThreadMessageGroup,
 } from "@/core/messages/utils";
-import { getRunScopedAnchorGroupIndices } from "@/core/messages/run-anchor";
 import {
   buildMessageSidecarContext,
   type SidecarContext,

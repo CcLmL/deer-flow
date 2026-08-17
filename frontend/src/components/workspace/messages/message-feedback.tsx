@@ -19,6 +19,8 @@ import {
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
+import { Tooltip } from "../tooltip";
+
 const FEEDBACK_CATEGORY_KEYS = [
   "incorrectOrIncomplete",
   "slowOrBuggy",
@@ -152,49 +154,55 @@ export function MessageFeedback({
     [feedback, handleDelete, openDialog],
   );
 
-  const thumbButtonClass = (active: boolean) =>
-    cn(
-      "text-muted-foreground hover:text-foreground rounded-md p-1 transition-colors",
-      active && "text-foreground",
-    );
-
   return (
     <div className="flex flex-col gap-1.5">
       <div className="flex items-center gap-1">
-        <button
-          type="button"
-          aria-label={t.feedback.helpful}
-          aria-pressed={feedback?.rating === 1}
-          className={thumbButtonClass(feedback?.rating === 1)}
-          onClick={() => handleThumbClick(1)}
-          disabled={isSubmitting}
-        >
-          <ThumbsUpIcon
-            className={cn("size-4", feedback?.rating === 1 && "fill-current")}
-          />
-        </button>
-        <button
-          type="button"
-          aria-label={t.feedback.notHelpful}
-          aria-pressed={feedback?.rating === -1}
-          className={thumbButtonClass(feedback?.rating === -1)}
-          onClick={() => handleThumbClick(-1)}
-          disabled={isSubmitting}
-        >
-          <ThumbsDownIcon
-            className={cn("size-4", feedback?.rating === -1 && "fill-current")}
-          />
-        </button>
-        {feedback && (
-          <button
+        <Tooltip content={t.feedback.helpful}>
+          <Button
+            aria-label={t.feedback.helpful}
+            aria-pressed={feedback?.rating === 1}
+            size="icon-sm"
             type="button"
-            aria-label={t.feedback.editComment}
-            className="text-muted-foreground hover:text-foreground rounded-md p-1 transition-colors"
-            onClick={() => openDialog(feedback.rating)}
+            variant="ghost"
             disabled={isSubmitting}
+            onClick={() => handleThumbClick(1)}
           >
-            <PencilIcon className="size-3" />
-          </button>
+            <ThumbsUpIcon
+              className={cn("size-3", feedback?.rating === 1 && "fill-current")}
+            />
+          </Button>
+        </Tooltip>
+        <Tooltip content={t.feedback.notHelpful}>
+          <Button
+            aria-label={t.feedback.notHelpful}
+            aria-pressed={feedback?.rating === -1}
+            size="icon-sm"
+            type="button"
+            variant="ghost"
+            disabled={isSubmitting}
+            onClick={() => handleThumbClick(-1)}
+          >
+            <ThumbsDownIcon
+              className={cn(
+                "size-3",
+                feedback?.rating === -1 && "fill-current",
+              )}
+            />
+          </Button>
+        </Tooltip>
+        {feedback && (
+          <Tooltip content={t.feedback.editComment}>
+            <Button
+              aria-label={t.feedback.editComment}
+              size="icon-sm"
+              type="button"
+              variant="ghost"
+              disabled={isSubmitting}
+              onClick={() => openDialog(feedback.rating)}
+            >
+              <PencilIcon className="size-3" />
+            </Button>
+          </Tooltip>
         )}
       </div>
       {feedback?.comment && (
