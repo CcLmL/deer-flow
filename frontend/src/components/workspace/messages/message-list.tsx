@@ -25,6 +25,7 @@ import {
   type ConversationProps,
 } from "@/components/ai-elements/conversation";
 import { Button } from "@/components/ui/button";
+import type { FeedbackData } from "@/core/api/feedback";
 import { extractArtifactsFromThread } from "@/core/artifacts/utils";
 import { useI18n } from "@/core/i18n/hooks";
 import {
@@ -32,6 +33,7 @@ import {
   deriveStableMessageGroups,
   type AssistantTurnUsageState,
 } from "@/core/messages/derived-state";
+import { getFeedbackByRunId } from "@/core/messages/feedback";
 import {
   deriveHumanInputThreadState,
   extractHumanInputRequest,
@@ -39,7 +41,10 @@ import {
   type HumanInputRequest,
   type HumanInputResponse,
 } from "@/core/messages/human-input";
-import { getRunDurationDisplaysByGroupIndex } from "@/core/messages/run-duration";
+import {
+  getMessageRunId,
+  getRunDurationDisplaysByGroupIndex,
+} from "@/core/messages/run-duration";
 import {
   buildTokenDebugSteps,
   type TokenDebugStep,
@@ -60,7 +65,7 @@ import {
   isHiddenFromUIMessage,
   type MessageGroup as ThreadMessageGroup,
 } from "@/core/messages/utils";
-import { getWorkspaceChangeAnchorGroupIndices } from "@/core/messages/workspace-change-anchor";
+import { getRunScopedAnchorGroupIndices } from "@/core/messages/run-anchor";
 import {
   buildMessageSidecarContext,
   type SidecarContext,
@@ -85,6 +90,7 @@ import {
   type HumanInputSubmitResult,
 } from "./human-input-card";
 import { MarkdownContent } from "./markdown-content";
+import { MessageFeedback } from "./message-feedback";
 import { MessageGroup } from "./message-group";
 import { MessageListItem } from "./message-list-item";
 import {
@@ -441,8 +447,12 @@ export function MessageList({
     () => getRunDurationDisplaysByGroupIndex(groupedMessages),
     [groupedMessages],
   );
-  const workspaceChangeAnchorGroupIndices = useMemo(
-    () => getWorkspaceChangeAnchorGroupIndices(groupedMessages),
+  const runScopedAnchorGroupIndices = useMemo(
+    () => getRunScopedAnchorGroupIndices(groupedMessages),
+    [groupedMessages],
+  );
+  const feedbackByRunId = useMemo(
+    () => getFeedbackByRunId(groupedMessages),
     [groupedMessages],
   );
   useEffect(() => {
@@ -761,6 +771,9 @@ export function MessageList({
       isStreaming: boolean,
       enableBranchForTurn: boolean,
       enableRegenerateForTurn: boolean,
+      threadId: string,
+      runId: string | undefined,
+      feedback: FeedbackData | null | undefined,
     ) => {
       const clipboardData = getAssistantTurnCopyData(messages, { isStreaming });
       const actionTarget = [...messages]
@@ -770,7 +783,7 @@ export function MessageList({
         .filter((message) => message.type === "ai" && message.id)
         .map((message) => message.id)
         .filter((id): id is string => typeof id === "string");
-      if (!clipboardData && !actionTarget) {
+      if (!clipboardData && !actionTarget && feedback === undefined) {
         return null;
       }
 
@@ -851,6 +864,13 @@ export function MessageList({
                 </Button>
               </Tooltip>
             )}
+            {!isStreaming && feedback !== undefined && runId && (
+            <MessageFeedback
+              threadId={threadId}
+              runId={runId}
+              initialFeedback={feedback}
+            />
+          )}
         </div>
       );
     },
@@ -991,6 +1011,18 @@ export function MessageList({
                 thread.isLoading && groupIndex === lastGroupIndex;
 
               if (group.type === "human" || group.type === "assistant") {
+                const assistantRunId =
+                  group.type === "assistant"
+                    ? getMessageRunId(
+                        group.messages.find(
+                          (message) => message.type === "ai",
+                        ) ?? group.messages[0]!,
+                      )
+                    : undefined;
+                const assistantFeedback =
+                  assistantRunId && runScopedAnchorGroupIndices.has(groupIndex)
+                    ? (feedbackByRunId.get(assistantRunId) ?? null)
+                    : undefined;
                 return withRunDuration(
                   group,
                   groupIndex,
@@ -1019,7 +1051,7 @@ export function MessageList({
                               : undefined
                           }
                           showCopyButton={group.type !== "assistant"}
-                          showWorkspaceChanges={workspaceChangeAnchorGroupIndices.has(
+                          showWorkspaceChanges={runScopedAnchorGroupIndices.has(
                             groupIndex,
                           )}
                           canEdit={
@@ -1092,6 +1124,9 @@ export function MessageList({
                         group.id !== undefined &&
                           branchableAssistantGroupIds.has(group.id),
                         group.id === latestAssistantGroupId,
+                        threadId,
+                        assistantRunId,
+                        assistantFeedback,
                       )}
                   </div>,
                 );

@@ -2,7 +2,7 @@ import type { Message } from "@langchain/langgraph-sdk";
 import { describe, expect, test } from "@rstest/core";
 
 import { getMessageGroups } from "@/core/messages/utils";
-import { getWorkspaceChangeAnchorGroupIndices } from "@/core/messages/workspace-change-anchor";
+import { getWorkspaceChangeAnchorGroupIndices } from "@/core/messages/run-anchor";
 
 function message(
   id: string,

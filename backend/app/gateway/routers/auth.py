@@ -12,7 +12,7 @@ from ipaddress import ip_address, ip_network
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr, Field, field_validator
-from starlette.responses import RedirectResponse
+from starlette.responses import RedirectResponse, JSONResponse
 
 from app.gateway.auth import (
     UserResponse,
@@ -20,7 +20,7 @@ from app.gateway.auth import (
 )
 from app.gateway.auth.config import get_auth_config
 from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
-from app.gateway.auth.oidc import OIDCError, OIDCService
+from app.gateway.auth.oidc import OIDCError, OIDCService, OIDCIdentity
 from app.gateway.auth.oidc_state import (
     OIDCStatePayload,
     compute_code_challenge,
@@ -34,9 +34,11 @@ from app.gateway.auth.oidc_state import (
 from app.gateway.auth.session_cookie import ACCESS_TOKEN_COOKIE_NAME, SESSION_PERSISTENCE_COOKIE_NAME, set_session_cookie
 from app.gateway.auth.session_cookie_state import SKIP_AUTH_CSRF_COOKIE_STATE_ATTR
 from app.gateway.auth.user_provisioning import get_or_provision_oidc_user
+from app.gateway.internal_auth import is_valid_internal_auth_token
 from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, _request_origin, auth_csrf_cookie_settings, generate_csrf_token, is_secure_request
 from app.gateway.deps import get_current_user_from_request, get_local_provider
 from deerflow.config.auth_config import OIDCProviderConfig
+from deerflow.config.paths import make_safe_user_id
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +150,22 @@ class MessageResponse(BaseModel):
     """Generic message response."""
 
     message: str
+
+
+class TokenExchangeRequest(BaseModel):
+    """Request to exchange an OIDC id_token for DeerFlow tokens."""
+
+    provider: str = Field(description="OIDC provider ID (must match configured provider)")
+    id_token: str = Field(description="Valid OIDC id_token from the provider")
+
+
+class TokenExchangeResponse(BaseModel):
+    """DeerFlow tokens for use by a trusted reverse proxy."""
+
+    access_token: str
+    csrf_token: str
+    remember_me: bool
+    expires_in: int
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────
@@ -844,6 +862,91 @@ async def oauth_callback(
     delete_state_cookie(redirect_response, request, provider)
 
     return redirect_response
+
+@router.post("/oidc/exchange", response_model=TokenExchangeResponse)
+async def oidc_token_exchange(request: Request, body: TokenExchangeRequest):
+    """Exchange a validated OIDC id_token for DeerFlow session tokens.
+
+    This endpoint is designed for deployment scenarios where a trusted
+    reverse proxy (nginx) authenticates the user and injects DeerFlow
+    session cookies via ``auth_request`` + ``add_header Set-Cookie``.
+
+    The id_token MUST have been validated by the proxy already — this
+    endpoint performs its own validation as a defense-in-depth measure.
+    """
+    from deerflow.config.app_config import get_app_config
+
+    app_config = get_app_config()
+    oidc_config = app_config.auth.oidc
+
+    if not oidc_config.enabled:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="SSO authentication is not enabled",
+        )
+    provider_config = oidc_config.providers.get(body.provider)
+    if not provider_config:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown SSO provider: {body.provider}",
+        )
+
+    # Validate the id_token against the OIDC provider
+    service = _get_oidc_service()
+    overrides = {
+        "authorization_endpoint": provider_config.authorization_endpoint,
+        "token_endpoint": provider_config.token_endpoint,
+        "userinfo_endpoint": provider_config.userinfo_endpoint,
+        "jwks_uri": provider_config.jwks_uri,
+    }
+
+    try:
+        metadata = await service.discover(provider_config.issuer, overrides)
+        claims = await service.validate_id_token(
+            metadata=metadata,
+            client_id=provider_config.client_id,
+            id_token=body.id_token,
+            nonce=None,  # id_token was issued by provider-initiated flow, no nonce
+        )
+    except OIDCError as exc:
+        logger.error("Token exchange: id_token validation failed for %s: %s", body.provider, exc)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired id_token",
+        )
+
+    # Build OIDCIdentity from claims
+    email = claims.get("email") or ""
+    identity = OIDCIdentity(
+        provider=body.provider,
+        subject=claims["sub"],
+        email=email,
+        email_verified=claims.get("email_verified") is True,
+        name=claims.get("name"),
+        claims=claims,
+    )
+
+    # Provision / lookup user (same logic as normal OIDC callback)
+    try:
+        result = await get_or_provision_oidc_user(
+            body.provider, provider_config, identity, get_local_provider()
+        )
+    except HTTPException:
+        raise  # Re-raise 403/409 from provisioning
+
+    user = result["user"]
+
+    # Generate DeerFlow tokens
+    token = create_access_token(str(user.id), token_version=user.token_version)
+    csrf_token = generate_csrf_token()
+    expires_in = get_auth_config().token_expiry_days * 24 * 3600
+
+    return TokenExchangeResponse(
+        access_token=token,
+        csrf_token=csrf_token,
+        remember_me=True,
+        expires_in=expires_in,
+    )
 
 
 def _build_error_redirect(frontend_base_url: str | None, error_code: str) -> str:

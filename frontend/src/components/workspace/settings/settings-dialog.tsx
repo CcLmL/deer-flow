@@ -221,7 +221,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
               {activeSection === "notification" && <NotificationSettingsPage />}
               {activeSection === "channels" && <ChannelsSettingsPage />}
               {activeSection === "integrations" && <IntegrationsSettingsPage />}
-              {activeSection === "about" && <AboutSettingsPage />}
+              {/* {activeSection === "about" && <AboutSettingsPage />} */}
             </div>
           </ScrollArea>
         </div>

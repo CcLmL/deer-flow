@@ -15,9 +15,11 @@ import { toast } from "sonner";
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 
 import { getAPIClient } from "../api";
+import type { FeedbackData } from "../api/feedback";
 import { fetch } from "../api/fetcher";
 import { getBackendBaseURL } from "../config";
 import { useI18n } from "../i18n/hooks";
+import type { MessageWithFeedback } from "../messages/feedback";
 import { getMessageRunId } from "../messages/run-duration";
 import {
   hasContent,
@@ -306,12 +308,15 @@ export function buildVisibleHistoryMessages(
     (message) => !supersededRunIds.has(message.run_id),
   );
   return dedupeMessagesByIdentity([
-    // Carry the owning run_id onto the content message so historical subtask
-    // cards can fetch their persisted step history on expand (#3779). run_id
-    // lives on the RunMessage wrapper and would otherwise be dropped here.
+    // Carry the owning run_id and the run-scoped feedback onto the content
+    // message so historical subtask cards can fetch their persisted step
+    // history on expand (#3779) and the feedback controls can restore the
+    // saved rating/comment. Both live on the RunMessage wrapper and would
+    // otherwise be dropped here.
     ...visibleRows.map((message) => ({
       ...message.content,
       run_id: message.run_id,
+      ...(message.feedback !== undefined ? { feedback: message.feedback } : {}),
     })),
   ]);
 }
@@ -470,6 +475,7 @@ export function mergeMessages(
 ): Message[] {
   const savedTurnDurations = new Map<string, number>();
   const savedRunIds = new Map<string, string>();
+  const savedFeedbacks = new Map<string, FeedbackData | null>();
   for (const msg of historyMessages) {
     const identity = messageIdentity(msg);
     const runId = getMessageRunId(msg);
@@ -481,6 +487,10 @@ export function mergeMessages(
         identity,
         msg.additional_kwargs.turn_duration as number,
       );
+    }
+    const feedback = (msg as MessageWithFeedback).feedback;
+    if (identity && feedback !== undefined) {
+      savedFeedbacks.set(identity, feedback);
     }
   }
 
@@ -578,10 +588,20 @@ export function mergeMessages(
     const shouldRestoreTurnDuration =
       savedTurnDurations.has(identity) &&
       message.additional_kwargs?.turn_duration === undefined;
-    if (shouldRestoreRunId || shouldRestoreTurnDuration) {
+    const shouldRestoreFeedback =
+      savedFeedbacks.has(identity) &&
+      (message as MessageWithFeedback).feedback === undefined;
+    if (
+      shouldRestoreRunId ||
+      shouldRestoreTurnDuration ||
+      shouldRestoreFeedback
+    ) {
       return {
         ...message,
         ...(shouldRestoreRunId ? { run_id: savedRunIds.get(identity) } : {}),
+        ...(shouldRestoreFeedback
+          ? { feedback: savedFeedbacks.get(identity) }
+          : {}),
         ...(shouldRestoreTurnDuration
           ? {
               additional_kwargs: {

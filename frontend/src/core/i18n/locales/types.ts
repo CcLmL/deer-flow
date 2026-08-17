@@ -62,6 +62,23 @@ export interface Translations {
     seconds: (value: number) => string;
     separator: string;
   };
+  
+  // Feedback
+  feedback: {
+    helpful: string;
+    notHelpful: string;
+    shareFeedback: string;
+    categories: {
+      incorrectOrIncomplete: string;
+      slowOrBuggy: string;
+      styleOrTone: string;
+      safetyOrLegalConcerns: string;
+      other: string;
+    };
+    detailsLabel: string;
+    detailsPlaceholder: string;
+    editComment: string;
+  };
 
   home: {
     docs: string;
@@ -206,13 +223,13 @@ export interface Translations {
     }[];
     suggestionsCreate: (
       | {
-          suggestion: string;
-          prompt: string;
-          icon: LucideIcon;
-        }
+        suggestion: string;
+        prompt: string;
+        icon: LucideIcon;
+      }
       | {
-          type: "separator";
-        }
+        type: "separator";
+      }
     )[];
     pleaseWaitStreaming: string;
   };

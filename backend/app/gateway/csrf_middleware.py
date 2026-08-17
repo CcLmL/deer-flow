@@ -66,6 +66,7 @@ _AUTH_EXEMPT_PATHS: frozenset[str] = frozenset(
         "/api/v1/auth/logout",
         "/api/v1/auth/register",
         "/api/v1/auth/initialize",
+        "/api/v1/auth/oidc/exchange",
     }
 )
 
