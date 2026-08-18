@@ -85,6 +85,7 @@ export const zhCN: Translations = {
       slowOrBuggy: "速度慢或存在问题",
       styleOrTone: "风格或语气",
       safetyOrLegalConcerns: "安全或法律疑虑",
+      outofdateMessage: "信息过时",
       other: "其他",
     },
     detailsLabel: "分享详细信息",

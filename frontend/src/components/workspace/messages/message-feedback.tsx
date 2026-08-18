@@ -26,6 +26,7 @@ const FEEDBACK_CATEGORY_KEYS = [
   "slowOrBuggy",
   "styleOrTone",
   "safetyOrLegalConcerns",
+  "outofdateMessage",
   "other",
 ] as const;
 
@@ -34,20 +35,60 @@ type FeedbackCategoryKey = (typeof FEEDBACK_CATEGORY_KEYS)[number];
 /**
  * Compose the stored comment from the selected category and the free-text
  * details. The backend stores one `comment` string per (thread, run), so the
- * category is persisted as plain text rather than a structured field.
+ * category is persisted as plain text rather than a structured field: the
+ * localized category label is wrapped in a `~label~` marker line ahead of the
+ * details so it can be split back out when editing.
  */
 function buildFeedbackComment(
   category: string | null,
   details: string,
 ): string | null {
   const trimmed = details.trim();
-  if (category && trimmed) {
-    return `${category}\n${trimmed}`;
-  }
   if (category) {
-    return category;
+    return trimmed ? `~${category}~\n${trimmed}` : `~${category}~`;
   }
   return trimmed || null;
+}
+
+type ParsedFeedbackComment = {
+  category: FeedbackCategoryKey | null;
+  details: string;
+};
+
+/**
+ * Split a stored comment back into its category and free-text details.
+ *
+ * Marker rows resolve against the *current* locale's labels; an unresolved
+ * marker (e.g. saved under another locale) is kept verbatim as free text
+ * rather than silently dropped. Legacy rows — a bare string equal to one
+ * category label, or any other plain text — degrade to a selected category
+ * with empty details, or details only.
+ */
+function parseFeedbackComment(
+  comment: string | null,
+  labels: Record<FeedbackCategoryKey, string>,
+): ParsedFeedbackComment {
+  if (!comment) {
+    return { category: null, details: "" };
+  }
+  const marker = /^~([^~\n]+)~\n?([\s\S]*)$/.exec(comment);
+  if (marker) {
+    const label = marker[1];
+    const key = FEEDBACK_CATEGORY_KEYS.find(
+      (candidate) => labels[candidate] === label,
+    );
+    if (key) {
+      return { category: key, details: marker[2] ?? "" };
+    }
+    return { category: null, details: comment };
+  }
+  const bareLabelKey = FEEDBACK_CATEGORY_KEYS.find(
+    (candidate) => labels[candidate] === comment,
+  );
+  if (bareLabelKey) {
+    return { category: bareLabelKey, details: "" };
+  }
+  return { category: null, details: comment };
 }
 
 /**
@@ -86,17 +127,37 @@ export function MessageFeedback({
     [t.feedback.categories],
   );
 
+  // Display the saved comment as `category\n details` without the internal
+  // `~label~` marker.
+  const displayedComment = useMemo(() => {
+    const parsed = parseFeedbackComment(
+      feedback?.comment ?? null,
+      t.feedback.categories,
+    );
+    if (parsed.category && parsed.details) {
+      return `${t.feedback.categories[parsed.category]}\n${parsed.details}`;
+    }
+    if (parsed.category) {
+      return t.feedback.categories[parsed.category];
+    }
+    return parsed.details;
+  }, [feedback, t.feedback.categories]);
+
   const openDialog = useCallback(
     (rating: number) => {
-      // Prefill the free-text details with the existing comment so editing
-      // does not silently drop the previously saved text. The category is not
-      // parsed back out of the stored string — the saved comment is one text.
-      setDetails(feedback?.comment ?? "");
-      setCategory(null);
+      // Split the saved comment back into its category and free-text details:
+      // the matching category button re-selects and the textarea carries only
+      // the comment, so editing does not silently drop or duplicate either.
+      const parsed = parseFeedbackComment(
+        feedback?.comment ?? null,
+        t.feedback.categories,
+      );
+      setCategory(parsed.category);
+      setDetails(parsed.details);
       setPendingRating(rating);
       setDialogOpen(true);
     },
-    [feedback],
+    [feedback, t.feedback.categories],
   );
 
   const handleSubmit = useCallback(async () => {
@@ -205,9 +266,9 @@ export function MessageFeedback({
           </Tooltip>
         )}
       </div>
-      {feedback?.comment && (
+      {displayedComment && (
         <p className="text-muted-foreground max-w-[20rem] text-xs break-words whitespace-pre-wrap">
-          {feedback.comment}
+          {displayedComment}
         </p>
       )}
       <Dialog

@@ -86,6 +86,7 @@ export const enUS: Translations = {
       slowOrBuggy: "Slow or has issues",
       styleOrTone: "Style or tone",
       safetyOrLegalConcerns: "Safety or legal concerns",
+      outofdateMessage: "Out of date message",
       other: "Other",
     },
     detailsLabel: "Share details",

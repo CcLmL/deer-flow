@@ -1,8 +1,8 @@
 import type { Message } from "@langchain/langgraph-sdk";
 import { describe, expect, test } from "@rstest/core";
 
+import { getRunScopedAnchorGroupIndices } from "@/core/messages/run-anchor";
 import { getMessageGroups } from "@/core/messages/utils";
-import { getWorkspaceChangeAnchorGroupIndices } from "@/core/messages/run-anchor";
 
 function message(
   id: string,
@@ -50,7 +50,7 @@ describe("workspace change card placement", () => {
       "assistant:processing",
       "assistant",
     ]);
-    expect([...getWorkspaceChangeAnchorGroupIndices(groups)]).toEqual([3]);
+    expect([...getRunScopedAnchorGroupIndices(groups)]).toEqual([3]);
   });
 
   test("anchors one card per run across consecutive turns", () => {
@@ -62,7 +62,7 @@ describe("workspace change card placement", () => {
       message("ai-2-final", "ai", "Second answer", "run-2"),
     ]);
 
-    expect([...getWorkspaceChangeAnchorGroupIndices(groups)]).toEqual([2, 4]);
+    expect([...getRunScopedAnchorGroupIndices(groups)]).toEqual([2, 4]);
   });
 
   test("ignores groups that never render the card", () => {
@@ -74,7 +74,7 @@ describe("workspace change card placement", () => {
       toolResult("tool-1", "run-1", "call-1"),
     ]);
 
-    expect(getWorkspaceChangeAnchorGroupIndices(groups).size).toBe(0);
+    expect(getRunScopedAnchorGroupIndices(groups).size).toBe(0);
   });
 
   test("skips assistant bubbles without a run id", () => {
@@ -85,7 +85,7 @@ describe("workspace change card placement", () => {
       message("ai-final", "ai", "Hi there"),
     ]);
 
-    expect(getWorkspaceChangeAnchorGroupIndices(groups).size).toBe(0);
+    expect(getRunScopedAnchorGroupIndices(groups).size).toBe(0);
   });
 
   test("keeps the streaming bubble anchored while the turn is still loading", () => {
@@ -99,12 +99,12 @@ describe("workspace change card placement", () => {
     const streaming = getMessageGroups(messages, {
       isCurrentTurnLoading: true,
     });
-    expect(getWorkspaceChangeAnchorGroupIndices(streaming).size).toBe(0);
+    expect(getRunScopedAnchorGroupIndices(streaming).size).toBe(0);
 
     const settled = getMessageGroups([
       ...messages,
       message("ai-final", "ai", "Done.", "run-1"),
     ]);
-    expect([...getWorkspaceChangeAnchorGroupIndices(settled)]).toEqual([2]);
+    expect([...getRunScopedAnchorGroupIndices(settled)]).toEqual([2]);
   });
 });

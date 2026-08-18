@@ -73,6 +73,7 @@ export interface Translations {
       slowOrBuggy: string;
       styleOrTone: string;
       safetyOrLegalConcerns: string;
+      outofdateMessage: string;
       other: string;
     };
     detailsLabel: string;
