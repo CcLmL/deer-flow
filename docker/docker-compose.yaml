@@ -166,10 +166,14 @@ services:
         PIP_INDEX_URL: ${PIP_INDEX_URL:-}
     container_name: deer-flow-provisioner
     volumes:
-      - ~/.kube/config:/root/.kube/config:ro
+      - /home/ubantu/.kube/config:/root/.kube/config:ro
+      - ${DEER_FLOW_HOME}/shared/access:/etc/deerflow/access:ro
     environment:
+      - QA_ACCESS_FILE=/etc/deerflow/access/qa_access.yaml
+      - PATHOLOGY_ACCESS_FILE=/etc/deerflow/access/pathology_access.yaml
+      - VET_ACCESS_FILE=/etc/deerflow/access/vet_access.yaml
       - K8S_NAMESPACE=deer-flow
-      - SANDBOX_IMAGE=enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
+      - SANDBOX_IMAGE=docker.io/library/all-in-one-sandbox:1.11.0-duckdb
       # Optional lark-cli init image (Pattern A). Empty ⇒ legacy runtime mount.
       # Set to a published tag (e.g. deer-flow/lark-cli-init:v1.0.65) to provision
       # the sandbox lark-cli runtime via an init container + emptyDir.
@@ -182,8 +186,9 @@ services:
       - THREADS_HOST_PATH=${DEER_FLOW_HOME}/threads
       - DEER_FLOW_HOST_BASE_DIR=${DEER_FLOW_HOME}
       - KUBECONFIG_PATH=/root/.kube/config
-      - NODE_HOST=host.docker.internal
-      - K8S_API_SERVER=https://host.docker.internal:26443
+      - NODE_HOST=10.0.27.83
+      - PROVISIONER_API_KEY=${PROVISIONER_API_KEY}
+      - SANDBOX_SERVICE_TYPE=NodePort
     env_file:
       - ../.env
     extra_hosts:

@@ -38,6 +38,7 @@ import time
 from contextlib import asynccontextmanager
 
 import urllib3
+import yaml
 from fastapi import FastAPI, HTTPException, Request, Response
 from kubernetes import client as k8s_client
 from kubernetes import config as k8s_config
@@ -150,6 +151,207 @@ def join_host_path(base: str, *parts: str) -> str:
     return str(result)
 
 
+# ── 共享数据目录 ─────────────────────────────────────────────────────────
+# config.yaml 的 sandbox.mounts 到不了 provisioner（被网关
+# _PROVISIONER_EXTRA_MOUNT_PATHS 过滤掉），共享目录在这里显式挂。
+# host_path 是 **Pod 落点执行机**上的路径：cifs 直挂在那里，
+# 59 的 NFS 导出不跨 cifs 子挂载点，走 NFS 只会看到空目录。
+SHARED_DATA_MOUNTS: tuple[tuple[str, str, str, bool], ...] = (
+    (
+        "shared-attachments",
+        join_host_path(DEER_FLOW_HOST_BASE_DIR, "shared", "attachments"),
+        "/app/backend/.deerflow/shared/attachments",
+        False,
+    ),
+    # (
+    #     "shared-qa-files",
+    #     "/mnt/deptshare/质量保证部/00-偏离及发现问题汇总",
+    #     "/app/backend/.deerflow/shared/qa_files",
+    #     True,
+    # ),
+    (
+        "shared-labshare",
+        "/mnt/labshare",
+        "/app/backend/.deerflow/shared/labshare",
+        True,
+    ),
+)
+
+# ── QA 共享目录：按用户白名单挂载 ────────────────────────────────────────
+QA_ACCESS_FILE = os.environ.get("QA_ACCESS_FILE", "/etc/deerflow/access/qa_access.yaml")
+QA_SHARE_ROOT = os.environ.get(
+    "QA_SHARE_ROOT", "/mnt/deptshare/质量保证部/00-偏离及发现问题汇总"
+)
+QA_CONTAINER_PATH = "/app/backend/.deerflow/shared/qa_files"
+
+
+def _qa_mounts_for(user_id: str) -> list[tuple[str, str, str, bool]]:
+    """该用户可见的 QA 挂载项（结构同 SHARED_DATA_MOUNTS）；未授权返回空列表。
+
+    每次建沙箱时读一次名单 ⇒ 改完名单对"新建的沙箱"立即生效，无需重启 provisioner。
+    任何异常一律按【拒绝】处理（fail-closed）。
+    """
+    try:
+        with open(QA_ACCESS_FILE, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh) or {}
+    except FileNotFoundError:
+        logger.warning("QA 白名单不存在：%s（本次不挂载 QA）", QA_ACCESS_FILE)
+        return []
+    except Exception as exc:
+        logger.error("QA 白名单解析失败：%s: %s（按拒绝处理）", QA_ACCESS_FILE, exc)
+        return []
+
+    if not isinstance(data, dict):
+        logger.error("QA 白名单格式不对：顶层应为 qa_files: 映射（按拒绝处理）")
+        return []
+
+    rules = data.get("qa_files") or {}
+    if not isinstance(rules, dict):
+        logger.error("QA 白名单格式不对：qa_files 应为 user_id: 权限 映射（按拒绝处理）")
+        return []
+
+    entry = rules.get(user_id)
+
+    if entry is True or (isinstance(entry, str) and entry.strip().lower() in ("all", "*")):
+        logger.info("QA 访问：user=%s 授权=全部", user_id)
+        return [("shared-qa-files", QA_SHARE_ROOT, QA_CONTAINER_PATH, True)]
+    if entry is None or entry == []:
+        logger.info("QA 访问：user=%s 未授权", user_id)
+        return []
+    if not isinstance(entry, list):
+        logger.error("QA 访问：user=%s 条目格式不对 %r（按拒绝处理）", user_id, entry)
+        return []
+
+    mounts: list[tuple[str, str, str, bool]] = []
+    for index, raw in enumerate(entry):
+        name = str(raw).strip()
+        if not name or "/" in name or "\\" in name or name in (".", ".."):
+            logger.error("QA 访问：忽略非法子目录 %r（user=%s）", raw, user_id)
+            continue
+        mounts.append((
+            f"shared-qa-{index}",
+            posixpath.join(QA_SHARE_ROOT, name),
+            f"{QA_CONTAINER_PATH}/{name}",
+            True,
+        ))
+    logger.info("QA 访问：user=%s 授权=%s", user_id, [m[1] for m in mounts])
+    return mounts
+
+
+# ── 病理共享目录：按用户白名单挂载 ──────────────────────────────────────
+PATHOLOGY_ACCESS_FILE = os.environ.get(
+    "PATHOLOGY_ACCESS_FILE", "/etc/deerflow/access/pathology_access.yaml"
+)
+PATHOLOGY_SHARE_ROOT = os.environ.get(
+    "PATHOLOGY_SHARE_ROOT", "/mnt/deptshare/病理研究部/【病理诊断项目管理】/★★★病理部试验安排★★★"
+)
+PATHOLOGY_CONTAINER_PATH = "/app/backend/.deerflow/shared/pathology_plan"
+
+
+def _pathology_mounts_for(user_id: str) -> list[tuple[str, str, str, bool]]:
+    """该用户可见的病理挂载项；未授权返回空列表。任何异常一律按【拒绝】处理（fail-closed）。"""
+    try:
+        with open(PATHOLOGY_ACCESS_FILE, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh) or {}
+    except FileNotFoundError:
+        logger.warning("病理白名单不存在：%s（本次不挂载病理数据）", PATHOLOGY_ACCESS_FILE)
+        return []
+    except Exception as exc:
+        logger.error("病理白名单解析失败：%s: %s（按拒绝处理）", PATHOLOGY_ACCESS_FILE, exc)
+        return []
+
+    if not isinstance(data, dict):
+        logger.error("病理白名单格式不对：顶层应为 pathology_plan: 映射（按拒绝处理）")
+        return []
+
+    rules = data.get("pathology_plan") or {}
+    if not isinstance(rules, dict):
+        logger.error("病理白名单格式不对：pathology_plan 应为 user_id: 权限 映射（按拒绝处理）")
+        return []
+
+    entry = rules.get(user_id)
+
+    if entry is True or (isinstance(entry, str) and entry.strip().lower() in ("all", "*")):
+        logger.info("病理访问：user=%s 授权=全部", user_id)
+        return [("shared-pathology-plan", PATHOLOGY_SHARE_ROOT, PATHOLOGY_CONTAINER_PATH, True)]
+    if entry is None or entry == []:
+        logger.info("病理访问：user=%s 未授权", user_id)
+        return []
+    if not isinstance(entry, list):
+        logger.error("病理访问：user=%s 条目格式不对 %r（按拒绝处理）", user_id, entry)
+        return []
+
+    mounts: list[tuple[str, str, str, bool]] = []
+    for index, raw in enumerate(entry):
+        name = str(raw).strip()
+        if not name or "/" in name or "\\" in name or name in (".", ".."):
+            logger.error("病理访问：忽略非法子目录 %r（user=%s）", raw, user_id)
+            continue
+        mounts.append((
+            f"shared-pathology-{index}",
+            posixpath.join(PATHOLOGY_SHARE_ROOT, name),
+            f"{PATHOLOGY_CONTAINER_PATH}/{name}",
+            True,
+        ))
+    logger.info("病理访问：user=%s 授权=%s", user_id, [m[1] for m in mounts])
+    return mounts
+
+
+# ── 兽医日程共享目录：按用户白名单挂载 ──────────────────────────────────
+VET_ACCESS_FILE = os.environ.get("VET_ACCESS_FILE", "/etc/deerflow/access/vet_access.yaml")
+VET_SHARE_ROOT = os.environ.get("VET_SHARE_ROOT", "/mnt/deptshare/兽医运行部/6 日程")
+VET_CONTAINER_PATH = "/app/backend/.deerflow/shared/vet_schedule"
+
+
+def _vet_mounts_for(user_id: str) -> list[tuple[str, str, str, bool]]:
+    """该用户可见的兽医日程挂载项；未授权返回空列表。任何异常一律按【拒绝】处理（fail-closed）。"""
+    try:
+        with open(VET_ACCESS_FILE, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh) or {}
+    except FileNotFoundError:
+        logger.warning("兽医白名单不存在：%s（本次不挂载兽医日程）", VET_ACCESS_FILE)
+        return []
+    except Exception as exc:
+        logger.error("兽医白名单解析失败：%s: %s（按拒绝处理）", VET_ACCESS_FILE, exc)
+        return []
+
+    if not isinstance(data, dict):
+        logger.error("兽医白名单格式不对：顶层应为 vet_schedule: 映射（按拒绝处理）")
+        return []
+
+    rules = data.get("vet_schedule") or {}
+    if not isinstance(rules, dict):
+        logger.error("兽医白名单格式不对：vet_schedule 应为 user_id: 权限 映射（按拒绝处理）")
+        return []
+
+    entry = rules.get(user_id)
+
+    if entry is True or (isinstance(entry, str) and entry.strip().lower() in ("all", "*")):
+        logger.info("兽医日程访问：user=%s 授权=全部", user_id)
+        return [("shared-vet-schedule", VET_SHARE_ROOT, VET_CONTAINER_PATH, True)]
+    if entry is None or entry == []:
+        logger.info("兽医日程访问：user=%s 未授权", user_id)
+        return []
+    if not isinstance(entry, list):
+        logger.error("兽医日程访问：user=%s 条目格式不对 %r（按拒绝处理）", user_id, entry)
+        return []
+
+    mounts: list[tuple[str, str, str, bool]] = []
+    for index, raw in enumerate(entry):
+        name = str(raw).strip()
+        if not name or "/" in name or "\\" in name or name in (".", ".."):
+            logger.error("兽医日程访问：忽略非法子目录 %r（user=%s）", raw, user_id)
+            continue
+        mounts.append((
+            f"shared-vet-{index}",
+            posixpath.join(VET_SHARE_ROOT, name),
+            f"{VET_CONTAINER_PATH}/{name}",
+            True,
+        ))
+    logger.info("兽医日程访问：user=%s 授权=%s", user_id, [m[1] for m in mounts])
+    return mounts
+
+
 def _host_base_dir_for_extra_mounts() -> str:
     """Return the host-visible DeerFlow state root used for controlled mounts."""
     if DEER_FLOW_HOST_BASE_DIR:
@@ -244,7 +446,8 @@ def _runtime_provided_extra_mounts(
     *sandbox* container and into the sidecar, so those are dropped here too —
     the sandbox never sees plaintext credentials.
     """
-    dropped: set[str] = set()
+    # dropped: set[str] = set()
+    dropped: set[str] = {"/mnt/skills/public", "/mnt/skills/custom", "/mnt/skills/legacy"}
     if _lark_cli_broker_enabled(provision_lark_cli_broker):
         dropped = {
             LARK_CLI_RUNTIME_CONTAINER_PATH,
@@ -577,12 +780,22 @@ def _build_volumes(
         userdata_vol = k8s_client.V1Volume(
             name="user-data",
             host_path=k8s_client.V1HostPathVolumeSource(
-                path=join_host_path(THREADS_HOST_PATH, thread_id, "user-data"),
+                path=join_host_path(DEER_FLOW_HOST_BASE_DIR, "users", user_id, "threads", thread_id, "user-data"),
                 type="DirectoryOrCreate",
             ),
         )
 
     volumes.append(userdata_vol)
+    for _s_name, _s_host, _s_ctr, _s_ro in (*SHARED_DATA_MOUNTS, *_qa_mounts_for(user_id), *_pathology_mounts_for(user_id), *_vet_mounts_for(user_id)):
+        volumes.append(
+            k8s_client.V1Volume(
+                name=_s_name,
+                host_path=k8s_client.V1HostPathVolumeSource(
+                    path=_s_host,
+                    type="Directory" if _s_ro else "DirectoryOrCreate",
+                ),
+            )
+        )
     volumes.extend(
         _build_extra_volumes(
             _runtime_provided_extra_mounts(
@@ -694,6 +907,14 @@ def _build_volume_mounts(
     if USERDATA_PVC_NAME:
         userdata_mount.sub_path = f"deer-flow/users/{user_id}/threads/{thread_id}/user-data"
     mounts.append(userdata_mount)
+    for _s_name, _s_host, _s_ctr, _s_ro in (*SHARED_DATA_MOUNTS, *_qa_mounts_for(user_id), *_pathology_mounts_for(user_id), *_vet_mounts_for(user_id)):
+        mounts.append(
+            k8s_client.V1VolumeMount(
+                name=_s_name,
+                mount_path=_s_ctr,
+                read_only=_s_ro,
+            )
+        )
     mounts.extend(
         _build_extra_volume_mounts(
             _runtime_provided_extra_mounts(
@@ -923,6 +1144,16 @@ def _build_pod(
                 provision_lark_cli_broker=provision_lark_cli_broker,
             ),
             restart_policy="Always",
+            topology_spread_constraints=[
+                k8s_client.V1TopologySpreadConstraint(
+                    max_skew=1,
+                    topology_key="kubernetes.io/hostname",
+                    when_unsatisfiable="ScheduleAnyway",
+                    label_selector=k8s_client.V1LabelSelector(
+                        match_labels={"app": "deer-flow-sandbox"}
+                    ),
+                )
+            ],
         ),
     )
 

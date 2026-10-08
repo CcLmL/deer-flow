@@ -1,0 +1,77 @@
+---
+name: pristima-report-agent
+description: 回答 Pristima 当前可导报表范围，并通过内网 Report Server 查询专题可用报表、预览表格或生成已实现报表的 PDF。用户询问能导哪些报表，或给出专题编号要求查看、生成报表时使用；新增、迁移和修复报表不适用。
+---
+
+# Pristima 报表 Agent
+
+用户提供专题编号和自然语言需求后，Agent 用报表服务查询该专题实际可用的报表，并交付表格或 PDF。用户无需提供 `PROREF_ID`、`RPT_DATA_TYPE`、`RPTFORMAT_ID`、`report_name` 或接口地址。
+
+服务地址固定为 `http://10.0.27.60:8890`。Agent 必须能访问这个内网地址，并具有保存结果文件的权限。通过服务 API 执行已有报表；不要直连 Oracle、Doris 或 Redis，也不要把本技能用于修改报表源码、模板或目录。
+
+Agent 不需要单独查询或填写 `proref_id`。`GetPTSReportTree` 为组装报表树，在 Pristima Oracle 中按专题编号解析一个 `PROREF_ID`，其响应里的 `data.proref_id` 只说明这次报表树用了哪条专题记录。生成接口只需要 `study_number`；各报表处理器通过自己的取数链重新解析业务数据所用的 `PROREF_ID`。不要把报表树 ID 当作生成数据的 ID，也不要凭树 ID 宣称 PDF 已核对专题版本。
+
+## 当前已实现报表
+
+当前已实现并完成精修的报表共 18 张。完整内部身份维护在 [已实现报表清单](scripts/已实现报表.md)。
+
+用户只询问“能导哪些报表”“支持哪些报表”或同义问题时，不要求专题编号，也不调用报表树接口，直接从已实现报表清单中获取信息。
+
+这份清单表示服务当前具备的导出能力，不表示每个专题都存在全部 18 张报表。用户询问某个专题实际能导哪些报表时，调用 `GetPTSReportTree`，并只返回专题叶子节点与已实现报表清单按 `report_name + rpt_data_type + rptformat_id` 精确匹配后的交集。用户要求生成清单外的报表时，明确说明该报表当前尚未列入已实现范围，不尝试用近似报表替代。
+
+## 执行方式
+
+1. 从用户话语中取得专题编号、想要的报表和输出类型。用户只是查询当前支持范围时，直接回答“当前已实现报表”清单。用户要求实际预览或生成但缺少专题编号时才询问。用户只给专题编号时，先列出该专题与已实现清单匹配的业务标题，让用户选择要生成哪张；明确要求全部时再逐张生成。
+2. 调用 `GetPTSReportTree` 查询该专题。只使用本次响应 `checked_all_data` 中的叶子节点，并与已实现报表清单按三项内部身份取交集。按业务标题匹配用户要求；同名或近似报表有多个 Format 时，展示业务差异并让用户选择，不能按 `report_name` 或编号大小猜测。
+3. 从**同一个叶子节点**取得 `report_name`、`rpt_data_type`、`rptformat_id`，用于预览和生成。用户没有说筛选条件时不添加条件，表示该报表的全部适用记录。用户明确指定动物、阶段、Session 等条件时，先核对真实候选值，再按接口契约传入；不能忽略错误条件后改查全部。
+   - 用户明确要求提供、显示或保留已有签名信息时，如果目标报表支持签名展示，在 `config_info` 顶层加入 `"With_Signature": true`。用户没有要求签名时不要擅自开启。
+4. 用户要表格时以 `render_type=table` 请求；要 PDF 时以 `render_type=pdf` 请求。只有收到真实、非空的 PDF 字节流并保存成功，才告知生成成功。返回错误 JSON 时说明错误，不保存为 `.pdf`。
+5. 交付报表业务标题、专题编号、实际筛选条件和可访问的文件路径。内部身份字段只在排错或用户询问时展示。
+
+优先使用 Agent 已有的 HTTP/文件工具。需要命令行时可用本技能附带的 [调用脚本](scripts/report_client.py)；它仅依赖 Python 标准库。接口字段和返回结构见 [API 参考](api-reference.md)。
+
+## 签名展示
+
+“提供签名”是指在报表中显示源数据里已经存在的电子签名，不是创建新签名、代替用户签署或给 PDF 加盖签章。
+
+当前明确支持该开关的是 `Body Weight Raw Report`（`body_weight / 1001 / 104`）和 `Clinical Observations Raw Report`（`clinical_observation_raw / 1005 / 112`）。用户需要显示签名时，将布尔值放在 `config_info` 顶层：
+
+```json
+{
+  "config_info": {
+    "study_number": "A2026002-GA015-02",
+    "report_name": "body_weight",
+    "rpt_data_type": "1001",
+    "rptformat_id": "104",
+    "render_type": "pdf",
+    "With_Signature": true
+  }
+}
+```
+
+必须使用字段名 `With_Signature`；建议使用 JSON 布尔值 `true`。未传时默认关闭。即使开启，也只显示实际带有签名数据的记录；没有签名的记录不会生成占位签名。对其他报表不能仅凭名称推断支持该参数，应先核对实现或接口契约。
+
+### 目标报表不支持签名时
+
+用户明确要求签名，但核对后确认目标报表尚未接入签名展示时，不能静默忽略该要求，不能继续传入 `With_Signature` 并声称已包含签名，也不能擅自改用其他报表。根据用户语境使用以下话术：
+
+- 一般提示：“当前选择的‘{报表标题}’尚未接入签名展示，无法通过 `With_Signature` 提供已有电子签名。是否继续生成不含签名的版本？”
+- 说明后续安排：“‘{报表标题}’的签名展示功能尚待后续实现，功能完成后再使用；目前即使传入 `With_Signature: true` 也不能生成签名内容。本次是否先生成不含签名的版本？”
+
+## 专题示例
+
+在本技能目录执行以下 PowerShell 命令，查询专题 `A2026002-GA015-02` 的真实可用报表：
+
+```powershell
+python .\scripts\report_client.py list --study-number A2026002-GA015-02
+```
+
+Agent 从返回的某个叶子节点复制 `report_name`、`rpt_data_type` 和 `rptformat_id`，再调用 `generate` 并用 `--output` 指定 Agent 可写的 PDF 路径。示例专题号是请求示范，不代表预先确定了该专题有哪些报表。脚本的 `table` 命令可把表格响应保存为 JSON；用户明确提出筛选条件时，用 `--config-file` 传入 Agent 构造的附加 `config_info`。
+
+本次只读验证中，该专题的树返回了 `Body Weight Raw Report` 节点，身份为 `body_weight / 1001 / 104`。以下命令展示完整生成调用；实际运行前仍须重新查询该专题报表树，输出路径应换成 Agent 当前可写的位置：
+
+```powershell
+python .\scripts\report_client.py generate --study-number A2026002-GA015-02 --report-name body_weight --rpt-data-type 1001 --rptformat-id 104 --output D:\Desktop\rpt\A2026002-GA015-02_体重原始报表.pdf
+```
+
+服务暂时不可达或超时时，最多自动重试一次；再次失败后报告实际错误。没有可用报表、报表身份不明确、接口报错或结果为空时，不替换成名称相近的其他报表。
