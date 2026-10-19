@@ -79,6 +79,8 @@ def report_config(args: argparse.Namespace, render_type: str) -> dict[str, Any]:
         if conflicts:
             raise ClientError(f"附加配置不能覆盖报表身份：{', '.join(sorted(conflicts))}")
         config.update(extra)
+    if args.generated_by is not None:
+        config["generated_by"] = args.generated_by.strip()
     return config
 
 
@@ -175,6 +177,7 @@ def parser() -> argparse.ArgumentParser:
             command.add_argument("--rptformat-id", required=True)
             command.add_argument("--output", required=True)
             command.add_argument("--config-file")
+            command.add_argument("--generated-by", help="报表生成人，未提供或为空时默认 xiaoxi")
         command.set_defaults(handler=handler)
     return main
 

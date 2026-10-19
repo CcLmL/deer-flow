@@ -2233,14 +2233,14 @@ export function useThreadStream({
             // subagent's values/messages into the thread view (#4399).
             streamResumable: true,
             config: {
-              recursion_limit: 1000,
+              recursion_limit: 2500,
             },
             context: {
               ...extraContext,
               ...context,
               thinking_enabled: context.mode !== "flash",
               is_plan_mode: context.mode === "pro" || context.mode === "ultra",
-              subagent_enabled: context.mode === "ultra",
+              subagent_enabled: context.mode !== "flash",
               reasoning_effort:
                 context.reasoning_effort ??
                 (context.mode === "ultra"
@@ -2355,13 +2355,13 @@ export function useThreadStream({
           // No streamSubgraphs — same contract as the main submit path (#4399).
           streamResumable: true,
           config: {
-            recursion_limit: 1000,
+            recursion_limit: 2500,
           },
           context: {
             ...context,
             thinking_enabled: context.mode !== "flash",
             is_plan_mode: context.mode === "pro" || context.mode === "ultra",
-            subagent_enabled: context.mode === "ultra",
+            subagent_enabled: context.mode !== "flash",
             reasoning_effort:
               context.reasoning_effort ??
               (context.mode === "ultra"

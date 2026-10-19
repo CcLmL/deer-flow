@@ -506,6 +506,10 @@ def resolve_agent_factory(assistant_id: str | None):
 # value is clamped to is configurable via ``AppConfig.max_recursion_limit``.
 _DEFAULT_RECURSION_LIMIT = 100
 _DEFAULT_MAX_RECURSION_LIMIT = 1000
+# Scheduled runs are unattended long-horizon work (report sweeps, digests).
+# Passing config=None made them inherit _DEFAULT_RECURSION_LIMIT (100) — one
+# tenth of the interactive budget — so they died at ~9 agent turns.
+_SCHEDULED_RECURSION_LIMIT = 2500
 
 
 def _resolve_max_recursion_limit() -> int:
@@ -1297,12 +1301,12 @@ async def launch_scheduled_thread_run(
         input={"messages": [{"role": "user", "content": prompt}]},
         command=None,
         metadata=metadata or {},
-        config=None,
+        config={"recursion_limit": _SCHEDULED_RECURSION_LIMIT},
         # ``user_id`` mirrors what IM channels put in ``body.context`` so
         # runtime-context consumers without a ContextVar fallback (e.g.
         # user-scoped GuardrailMiddleware providers) see the owning user;
         # ``inject_authenticated_user_context`` skips the internal user.
-        context=({"non_interactive": True, "user_id": owner_user_id} if owner_user_id else {"non_interactive": True}),
+        context={"non_interactive": True, "subagent_enabled": True, **({"user_id": owner_user_id} if owner_user_id else {})},
         webhook=None,
         checkpoint_id=None,
         checkpoint=None,
