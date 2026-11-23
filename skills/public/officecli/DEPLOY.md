@@ -160,9 +160,14 @@ Why:
   to enabled; the explicit entry documents the intent.
 - `ppt-generation`: image-only and depends on the cloud `image-generation`
   skill. It cannot run in the intranet and will compete for PPT triggers.
-- `office-documents`: the earlier self-built PPT/Word skill; superseded. It is
-  not deployed today, but the entry prevents accidental overlap if the repo is
-  updated.
+- `office-documents`: only if that skill directory is present in the target
+  checkout; adding a config entry does not create the skill. It is not deployed
+  today, but the entry prevents accidental overlap if the repo is updated.
+
+A production file with `"skills": {}` does **not** mean "no skills". It means
+there are no per-skill overrides, and public/custom/legacy skills default to
+enabled (`ExtensionsConfig.is_skill_enabled`). In particular, `ppt-generation`
+is enabled until it is explicitly disabled with `{"enabled": false}`.
 
 After editing, restart the Gateway:
 

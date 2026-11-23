@@ -15,7 +15,8 @@ from langgraph.constants import TAG_NOSTREAM
 from langgraph.graph.message import REMOVE_ALL_MESSAGES
 from langgraph.runtime import Runtime
 
-from deerflow.agents.middlewares.dynamic_context_middleware import is_dynamic_context_reminder
+from deerflow.agents.human_input import read_human_input_response
+from deerflow.agents.middlewares.dynamic_context_middleware import INJECTED_USER_MESSAGE_ID_SUFFIX, is_dynamic_context_reminder
 from deerflow.config.app_config import get_app_config
 from deerflow.models import create_chat_model
 
@@ -92,6 +93,54 @@ def _resolve_agent_name(runtime: Runtime) -> str | None:
             return None
         agent_name = config_data.get("configurable", {}).get("agent_name")
     return agent_name
+
+
+def _resolve_run_id(runtime: Runtime | None) -> str | None:
+    """Resolve the current run ID from runtime context or LangGraph config."""
+    run_id = runtime.context.get("run_id") if runtime is not None and runtime.context else None
+    if run_id is None:
+        try:
+            config_data = get_config()
+        except RuntimeError:
+            return None
+        run_id = config_data.get("configurable", {}).get("run_id")
+    return run_id
+
+
+def _is_hidden_user_message(message: HumanMessage) -> bool:
+    """Return whether *message* is framework-injected rather than user input.
+
+    ``hide_from_ui`` also marks hidden replies from HumanInputCard, which carry
+    a valid structured response and ARE genuine user input — mirror the
+    genuine-message test used by input sanitization.
+    """
+    if message.name == _SUMMARY_TRIGGER_MESSAGE_NAME:
+        return True
+    return bool(message.additional_kwargs.get("hide_from_ui")) and read_human_input_response(message.additional_kwargs) is None
+
+
+def _find_current_user_message(messages: list[AnyMessage], current_run_id: str | None) -> HumanMessage | None:
+    """Find the user message that started the active run.
+
+    ``ThreadDataMiddleware.before_agent`` stamps the run's incoming HumanMessage
+    with ``additional_kwargs["run_id"]``. Matching on that id is the only precise
+    way to distinguish the active question from an older ID-swapped ``__user``
+    question that must be summarized with the rest of the history.
+
+    When no run id is available (manual compaction, replay), fall back to the
+    newest genuine HumanMessage. A run id that is present but does not match any
+    message returns ``None``: guessing could resurrect a stale question.
+    """
+    if current_run_id is not None:
+        for message in reversed(messages):
+            if isinstance(message, HumanMessage) and not _is_hidden_user_message(message) and message.additional_kwargs.get("run_id") == current_run_id:
+                return message
+        return None
+
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage) and not _is_hidden_user_message(message):
+            return message
+    return None
 
 
 class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
@@ -508,6 +557,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
     def _prepare_compaction(
         self,
         state: AgentState,
+        runtime: Runtime,
         *,
         force: bool = False,
     ) -> tuple[list[AnyMessage], list[AnyMessage], str | None, int] | None:
@@ -524,8 +574,9 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         if cutoff_index <= 0:
             return None
 
+        current_user_message = _find_current_user_message(messages, _resolve_run_id(runtime))
         messages_to_summarize, preserved_messages = self._partition_messages(messages, cutoff_index)
-        messages_to_summarize, preserved_messages = self._preserve_dynamic_context_reminders(messages_to_summarize, preserved_messages)
+        messages_to_summarize, preserved_messages = self._preserve_active_context(messages_to_summarize, preserved_messages, current_user_message)
         if not messages_to_summarize:
             return None
         return messages_to_summarize, preserved_messages, previous_summary, total_tokens
@@ -546,7 +597,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         so it can be reported distinctly from "nothing to compact"; the automatic path
         leaves it False and swallows the failure, retrying on a later triggered turn.
         """
-        prepared = self._prepare_compaction(state, force=force)
+        prepared = self._prepare_compaction(state, runtime, force=force)
         if prepared is None:
             return None
         messages_to_summarize, preserved_messages, previous_summary, total_tokens = prepared
@@ -576,7 +627,7 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
         raise_on_failure: bool = False,
     ) -> ContextCompactionResult | None:
         """Async counterpart of :meth:`compact_state` (see it for ``raise_on_failure``)."""
-        prepared = self._prepare_compaction(state, force=force)
+        prepared = self._prepare_compaction(state, runtime, force=force)
         if prepared is None:
             return None
         messages_to_summarize, preserved_messages, previous_summary, total_tokens = prepared
@@ -624,55 +675,48 @@ class DeerFlowSummarizationMiddleware(SummarizationMiddleware):
             "summary_text": result.summary_text,
         }
 
-    def _preserve_dynamic_context_reminders(
+    def _preserve_active_context(
         self,
         messages_to_summarize: list[AnyMessage],
         preserved_messages: list[AnyMessage],
+        current_user_message: HumanMessage | None,
     ) -> tuple[list[AnyMessage], list[AnyMessage]]:
-        """Keep hidden dynamic-context reminders and their ID-swap peers out of summary compression.
+        """Keep hidden context reminders and the active user turn out of compression.
 
-        These reminders carry the current date and optional memory. If summarization
-        removes them, DynamicContextMiddleware can lose the already-injected reminder
-        and inject a replacement into the wrong point of the conversation.
+        Two kinds of messages are rescued:
 
-        The ID-swap triplet produced by ``_make_reminder_and_user_messages`` contains
-        three messages: ``SystemMessage(id=X)`` and ``HumanMessage(id=X__memory)`` are
-        both tagged with ``dynamic_context_reminder=True``, but ``HumanMessage(id=X__user)``
-        carries the original user content and is **not** tagged. Without peer rescue,
-        ``__user`` would stay in ``to_summarize`` and be compressed into prose — orphaning
-        the tagged messages and losing the user question from the model's direct context.
+        * **Tagged dynamic-context reminders** (the date ``SystemMessage`` and the
+          optional ``__memory`` HumanMessage). If summarization removed the date
+          reminder, DynamicContextMiddleware would lose the already-injected date
+          and re-inject one at the wrong point of the conversation.
+        * **The current run's user message and its ID-swap peers** (``X``,
+          ``X__memory``, ``X__user``). The current question must stay literal in
+          the model window; a summary alone is too easy to lose mid-run.
 
-        This method rescues tagged reminders and also rescues any untagged messages whose
-        ``id`` shares the same ``stable_id`` prefix (i.e. ``X__user``, ``X__memory``).
+        Historical ``__user`` questions are deliberately **not** rescued. They are
+        ordinary conversation content and belong in the summary. The old blanket
+        ID-swap peer rescue hoisted every first-turn question to the front of the
+        preserved window, so after a long run the model saw a stale question as
+        the only literal user request and answered it instead of the active task
+        (production: T034 resurrected mid-T042 run). Their date/memory reminders
+        are still rescued, because they carry authoritative framework context.
         """
-        reminders = [msg for msg in messages_to_summarize if is_dynamic_context_reminder(msg)]
-        if not reminders:
-            return messages_to_summarize, preserved_messages
+        # Resolve the current turn's ID-swap base. ``removesuffix`` is suffix-only,
+        # so a stable id containing "__" in the middle stays intact.
+        current_base_ids: set[str] = set()
+        if current_user_message is not None and current_user_message.id:
+            current_base = current_user_message.id.removesuffix(INJECTED_USER_MESSAGE_ID_SUFFIX)
+            if current_base:
+                current_base_ids.add(current_base)
 
-        # Collect the base IDs (the stable_id prefix) from tagged reminders.
-        # For a reminder with id="ctx-001__memory", the base is "ctx-001".
-        # For a reminder with id="ctx-001" (SystemMessage), the base is "ctx-001".
-        # removesuffix is suffix-only — it won't strip a "__" that sits in the
-        # middle of a stable_id (e.g. "ctx__001" stays intact, unlike rsplit
-        # which would mis-derive "ctx").  Only known ID-swap suffixes (__memory,
-        # __user) are stripped; __user is not tagged so won't appear in reminders,
-        # but is included defensively.
-        reminder_base_ids: set[str] = set()
-        for msg in reminders:
-            if msg.id:
-                base = msg.id.removesuffix("__memory").removesuffix("__user")
-                reminder_base_ids.add(base)
-
-        # Single-pass partition: walk messages_to_summarize in chronological order
-        # and rescue both tagged reminders and untagged ID-swap peers (whose id
-        # starts with a known base + "__").  This preserves the original message
-        # order within rescued — critical when multiple triplets land in one
-        # summarization window — and eliminates the need for id(m)-based dedup
-        # that the previous reminders+peers concatenation required.
+        # Single-pass partition preserves chronological order across multiple
+        # rescued reminders in one summarization window.
         rescued: list[AnyMessage] = []
         remaining: list[AnyMessage] = []
         for msg in messages_to_summarize:
-            if is_dynamic_context_reminder(msg) or (msg.id and any(msg.id.startswith(b + "__") for b in reminder_base_ids)):
+            is_current_user = current_user_message is not None and (msg is current_user_message or (current_user_message.id is not None and msg.id == current_user_message.id))
+            is_current_peer = bool(current_base_ids and msg.id and any(msg.id.startswith(base + "__") or msg.id == base for base in current_base_ids))
+            if is_dynamic_context_reminder(msg) or is_current_user or is_current_peer:
                 rescued.append(msg)
             else:
                 remaining.append(msg)

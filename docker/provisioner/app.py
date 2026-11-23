@@ -352,6 +352,72 @@ def _vet_mounts_for(user_id: str) -> list[tuple[str, str, str, bool]]:
     return mounts
 
 
+# ── 兽医绩效（10绩效）共享目录：按用户白名单挂载 ──────────────────────
+VET_PERFORMANCE_ACCESS_FILE = os.environ.get(
+    "VET_PERFORMANCE_ACCESS_FILE",
+    "/etc/deerflow/access/vet_performance_access.yaml",
+)
+VET_PERFORMANCE_SHARE_ROOT = os.environ.get(
+    "VET_PERFORMANCE_SHARE_ROOT",
+    "/mnt/deptshare/兽医运行部/10 绩效",
+)
+VET_PERFORMANCE_CONTAINER_PATH = "/app/backend/.deerflow/shared/vet_performance"
+
+
+def _vet_performance_mounts_for(user_id: str) -> list[tuple[str, str, str, bool]]:
+    """该用户可见的 10绩效 挂载项；未授权返回空列表。
+
+    只接受 all / * / True；不接受子目录清单。任何异常一律按【拒绝】处理（fail-closed）。
+    这是个人绩效数据，宁可不挂，不可误挂。
+    """
+    try:
+        with open(VET_PERFORMANCE_ACCESS_FILE, encoding="utf-8") as fh:
+            data = yaml.safe_load(fh) or {}
+    except FileNotFoundError:
+        logger.warning(
+            "兽医绩效白名单不存在：%s（本次不挂载 10绩效）",
+            VET_PERFORMANCE_ACCESS_FILE,
+        )
+        return []
+    except Exception as exc:
+        logger.error(
+            "兽医绩效白名单解析失败：%s: %s（按拒绝处理）",
+            VET_PERFORMANCE_ACCESS_FILE,
+            exc,
+        )
+        return []
+
+    if not isinstance(data, dict):
+        logger.error("兽医绩效白名单格式不对：顶层应为 vet_performance: 映射（按拒绝处理）")
+        return []
+
+    rules = data.get("vet_performance") or {}
+    if not isinstance(rules, dict):
+        logger.error("兽医绩效白名单格式不对：vet_performance 应为 user_id: all 映射（按拒绝处理）")
+        return []
+
+    entry = rules.get(user_id)
+    if entry is True or (isinstance(entry, str) and entry.strip().lower() in ("all", "*")):
+        logger.info("兽医绩效访问：user=%s 授权=全部", user_id)
+        return [(
+            "shared-vet-performance",
+            VET_PERFORMANCE_SHARE_ROOT,
+            VET_PERFORMANCE_CONTAINER_PATH,
+            True,
+        )]
+
+    if entry is None or entry == []:
+        logger.info("兽医绩效访问：user=%s 未授权", user_id)
+        return []
+
+    logger.error(
+        "兽医绩效访问：user=%s 条目格式不接受 %r（只允许 all；按拒绝处理）",
+        user_id,
+        entry,
+    )
+    return []
+
+
 def _host_base_dir_for_extra_mounts() -> str:
     """Return the host-visible DeerFlow state root used for controlled mounts."""
     if DEER_FLOW_HOST_BASE_DIR:
@@ -786,7 +852,7 @@ def _build_volumes(
         )
 
     volumes.append(userdata_vol)
-    for _s_name, _s_host, _s_ctr, _s_ro in (*SHARED_DATA_MOUNTS, *_qa_mounts_for(user_id), *_pathology_mounts_for(user_id), *_vet_mounts_for(user_id)):
+    for _s_name, _s_host, _s_ctr, _s_ro in (*SHARED_DATA_MOUNTS, *_qa_mounts_for(user_id), *_pathology_mounts_for(user_id), *_vet_mounts_for(user_id), *_vet_performance_mounts_for(user_id),):
         volumes.append(
             k8s_client.V1Volume(
                 name=_s_name,
@@ -907,7 +973,7 @@ def _build_volume_mounts(
     if USERDATA_PVC_NAME:
         userdata_mount.sub_path = f"deer-flow/users/{user_id}/threads/{thread_id}/user-data"
     mounts.append(userdata_mount)
-    for _s_name, _s_host, _s_ctr, _s_ro in (*SHARED_DATA_MOUNTS, *_qa_mounts_for(user_id), *_pathology_mounts_for(user_id), *_vet_mounts_for(user_id)):
+    for _s_name, _s_host, _s_ctr, _s_ro in (*SHARED_DATA_MOUNTS, *_qa_mounts_for(user_id), *_pathology_mounts_for(user_id), *_vet_mounts_for(user_id), *_vet_performance_mounts_for(user_id)):
         mounts.append(
             k8s_client.V1VolumeMount(
                 name=_s_name,
@@ -1110,12 +1176,12 @@ def _build_pod(
                     resources=k8s_client.V1ResourceRequirements(
                         requests={
                             "cpu": "100m",
-                            "memory": "256Mi",
+                            "memory": "512Mi",
                             "ephemeral-storage": "500Mi",
                         },
                         limits={
                             "cpu": "1000m",
-                            "memory": "1Gi",
+                            "memory": "4Gi",
                             "ephemeral-storage": "500Mi",
                         },
                     ),

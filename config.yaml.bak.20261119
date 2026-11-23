@@ -1,0 +1,301 @@
+config_version: 29
+log_level: info
+token_usage:
+  enabled: true
+models:
+- name: glm-5.3-flash-pro6000
+  display_name: glm-5.3-flash
+  use: langchain_openai:ChatOpenAI
+  model: glm-5.3-flash-pro6000
+  api_key: e75f18776d10e01c4d64e388465c00093aa9ea39ddc18e48
+  base_url: http://10.0.27.60:8081/v1
+  supports_thinking: true
+  context_window: 131072
+  temperature: 1.0
+  top_p: 0.95
+  max_tokens: 8192
+  when_thinking_enabled:
+    extra_body:
+      chat_template_kwargs:
+        enable_thinking: true
+      repetition_penalty: 1.05
+      thinking_token_budget: 4096
+  when_thinking_disabled:
+    extra_body:
+      chat_template_kwargs:
+        enable_thinking: false
+- name: deepseek-v4-flash
+  display_name: deepseek-v4-flash
+  use: langchain_openai:ChatOpenAI
+  model: deepseek-v4-flash
+  api_key: $OPENAI_API_KEY
+  base_url: https://api.deepseek.com
+  supports_thinking: true
+  supports_vision: false
+  when_thinking_enabled:
+    extra_body:
+      thinking:
+        type: enabled
+  when_thinking_disabled:
+    extra_body:
+      thinking:
+        type: disabled
+tool_groups:
+- name: web
+- name: file:read
+- name: file:write
+- name: bash
+tools:
+- name: image_search
+  group: web
+  use: deerflow.community.image_search.tools:image_search_tool
+  max_results: 5
+- name: ls
+  group: file:read
+  use: deerflow.sandbox.tools:ls_tool
+- name: read_file
+  group: file:read
+  use: deerflow.sandbox.tools:read_file_tool
+- name: glob
+  group: file:read
+  use: deerflow.sandbox.tools:glob_tool
+  max_results: 200
+- name: grep
+  group: file:read
+  use: deerflow.sandbox.tools:grep_tool
+  max_results: 100
+- name: write_file
+  use: deerflow.sandbox.tools:write_file_tool
+  group: file:write
+- name: str_replace
+  use: deerflow.sandbox.tools:str_replace_tool
+  group: file:write
+- name: bash
+  use: deerflow.sandbox.tools:bash_tool
+  group: bash
+- name: web_search
+  group: web
+  use: deerflow.community.searxng.tools:web_search_tool
+  base_url: http://10.0.27.74:8080   # SearXNG instance URL (default: :8088; Docker: http://searxng:8080)
+  max_results: 5                     # Maximum number of search results
+tool_search:
+  enabled: false
+  auto_promote_top_k: 3
+suggestions:
+  enabled: false
+loop_detection:
+  enabled: true
+  warn_threshold: 3
+  hard_limit: 5
+  window_size: 20
+  max_tracked_threads: 100
+  tool_freq_warn: 30
+  tool_freq_hard_limit: 50
+  tool_freq_overrides:
+    bash:
+      warn: 80
+      hard_limit: 120
+uploads:
+  max_files: 10
+  max_file_size: 52428800
+  max_total_size: 104857600
+  auto_convert_documents: false
+  pdf_converter: auto
+sandbox:
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
+  provisioner_url: http://provisioner:8002
+  provisioner_api_key: $PROVISIONER_API_KEY
+  replicas: 10
+  bash_output_max_chars: 20000
+  read_file_output_max_chars: 50000
+  ls_output_max_chars: 20000
+  allow_host_bash: false
+  bash_command_timeout: 1200
+  mounts:
+    - host_path: /home/ubantu/deerflowGit/deer-flow/backend/.deer-flow/shared/attachments
+      container_path: /app/backend/.deerflow/shared/attachments
+      read_only: false
+    - host_path: /mnt/deptshare/质量保证部/00-偏离及发现问题汇总
+      container_path: /app/backend/.deerflow/shared/qa_files
+      read_only: true
+    - host_path: /mnt/labshare
+      container_path: /app/backend/.deerflow/shared/labshare
+      read_only: true
+subagents:
+  custom_agents:
+    sensitive-worker:
+      description: >-
+        处理公司内部敏感数据任务（病理/QA/兽医/台账/文档翻译/实验数据/人员名单/SOP）
+        时委派给它；数据只在内网处理，绝不外发。
+      system_prompt: |
+        你是内部数据专员，运行在本地模型上。只读检索内部数据，绝不外发。
+        - 需要发邮件时直接用 send_email 工具直发（收件人以任务说明为准），
+          发完在回复里只写一句话结论（如"已完成并发送至 xx@topgenebio.com"），
+          不要把数据明细写进回复。
+        - 数据目录不存在 = 无权限，如实说明。
+      model: glm-5.3-flash
+      tools: null                    # 继承父工具集（含 send_email）
+      disallowed_tools: ["task", "ask_clarification", "present_files"]
+
+    general-worker:
+      description: >-
+        处理通用任务（代码生成、公开知识、非敏感总结与文案）时委派给它。
+      system_prompt: |
+        你是通用任务专员。委派给你的内容不应包含公司内部数据；
+        若上下文里出现内部敏感数据（专题编号、人名、客户名、内部文档内容），
+        立即停止并回复"需要本地子 Agent 处理"，不要继续。
+      model: deepseek-v4-flash
+      tools: null
+      disallowed_tools: ["task", "ask_clarification", "present_files"]
+skills:
+  container_path: /mnt/skills
+  deferred_discovery: true
+title:
+  enabled: true
+  max_words: 6
+  max_chars: 60
+  model_name: null
+summarization:
+  enabled: true
+  model_name: null
+  trigger:
+  - type: tokens
+    value: 60000
+  keep:
+    type: tokens
+    value: 10000
+  trim_tokens_to_summarize: 15564
+  summary_prompt: |
+    {messages}
+    
+    请用中文总结以上对话的关键信息。务必保留：                                                                                 
+    1. 用户当前正在执行的精确任务（不要混淆历史任务）                                                                          
+    2. 用户最近的明确指令                                                                                                      
+    3. 已经完成的步骤
+  skill_file_read_tool_names:
+  - read_file
+  - read
+  - view
+  - cat
+memory:
+  enabled: true
+  storage_path: memory.json
+  debounce_seconds: 30
+  model_name: null
+  max_facts: 50
+  fact_confidence_threshold: 0.75
+  injection_enabled: false
+  max_injection_tokens: 2000
+  token_counting: tiktoken
+  shutdown_flush_timeout_seconds: 30.0
+  manager_class: deermem
+  mode: middleware
+  backend_config:
+    storage_path: ''
+    storage_class: file
+    strict_user_scope: false
+    manifest_filename: memory.json
+    file_lock_timeout_seconds: 10
+    retrieval_adapter: ''
+    model:
+      model: deepseek-v4-flash
+      base_url: https://api.deepseek.com
+    debounce_seconds: 300
+    max_facts: 100
+    fact_confidence_threshold: 0.7
+    max_injection_tokens: 2000
+    token_counting: tiktoken
+    guaranteed_categories:
+    - correction
+    guaranteed_token_budget: 500
+    staleness_review_enabled: true
+    staleness_age_days: 90
+    staleness_min_candidates: 3
+    staleness_max_removals_per_cycle: 10
+    staleness_protected_categories:
+    - correction
+    staleness_max_lifetime_multiplier: 20.0
+    staleness_max_extension_days: 3650
+    consolidation_enabled: false
+    consolidation_min_facts: 8
+    consolidation_max_groups_per_cycle: 3
+    consolidation_max_sources: 8
+agents_api:
+  enabled: false
+skill_evolution:
+  enabled: false
+  moderation_model_name: null
+  security_fail_closed: true
+database:
+  backend: postgres
+  postgres_url: $DATABASE_URL
+  sqlite_dir: .deer-flow/data
+  pool_recycle: 300
+  command_timeout: 30
+  checkpoint_channel_mode: full
+run_events:
+  backend: db
+  max_trace_content: 10240
+  track_token_usage: true
+tool_output:
+  enabled: true
+  externalize_min_chars: 3000
+  preview_head_chars: 2000
+  preview_tail_chars: 1000
+  fallback_max_chars: 30000
+  fallback_head_chars: 8000
+  fallback_tail_chars: 3000
+  storage_subdir: .tool-results
+  exempt_tools:
+  - read_file
+  - read_file_tool
+safety_finish_reason:
+  enabled: true
+auth:
+  oidc:
+    enabled: true
+    frontend_base_url: ''
+    providers:
+      keycloak:
+        display_name: keycloak
+        issuer: http://10.0.27.73:8080/realms/TQXS
+        client_id: tqxs_deerflow
+        client_secret: GRPZDNxNRUzMIOLoCaGjFUcNt4zkFRQI
+        scopes:
+        - openid
+        - profile
+        - email
+        pkce_enabled: false
+        redirect_uri: http://10.0.27.59:2026/api/v1/auth/callback/keycloak
+logging:
+  enhance:
+    enabled: false
+    format: text
+token_budget:
+  enabled: false
+  max_tokens: 200000
+  max_input_tokens: null
+  max_output_tokens: null
+  warn_threshold: 0.8
+  hard_stop_threshold: 1.0
+max_recursion_limit: 3000
+input_polish:
+  enabled: true
+  max_chars: 4000
+  model_name: null
+read_before_write:
+  enabled: true
+skill_scan:
+  enabled: true
+scheduler:
+  enabled: true
+  poll_interval_seconds: 5
+  lease_seconds: 120
+  max_concurrent_runs: 3
+  min_once_delay_seconds: 60
+run_ownership:
+  lease_seconds: 30
+  grace_seconds: 10
+  heartbeat_enabled: false
+authorization:
+  enabled: false

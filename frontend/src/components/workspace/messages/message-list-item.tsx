@@ -39,6 +39,7 @@ import {
   extractContentFromMessage,
   extractReasoningContentFromMessage,
   getMessageCopyData,
+  getMessageCreatedAt,
   parseUploadedFiles,
   stripUploadedFilesTag,
   type FileInMessage,
@@ -50,6 +51,7 @@ import {
 } from "@/core/skills";
 import { useSkills } from "@/core/skills/hooks";
 import { SafeReasoningContent } from "@/core/streamdown/components";
+import { formatDateTime } from "@/core/utils/datetime";
 import { cn } from "@/lib/utils";
 
 import { WorkspaceChangeBadge } from "../changes";
@@ -87,8 +89,13 @@ export function MessageListItem({
   isEditPending?: boolean;
   onEditAndRegenerate?: (replacementText: string) => void | Promise<boolean>;
 }) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const isHuman = message.type === "human";
+  const createdAt = isHuman ? getMessageCreatedAt(message) : undefined;
+  const createdAtLabel = useMemo(
+    () => (createdAt ? formatDateTime(createdAt, locale) : ""),
+    [createdAt, locale],
+  );
   const editableText = useMemo(
     () => (isHuman ? (getMessageCopyData(message) ?? "") : ""),
     [isHuman, message],
@@ -153,6 +160,15 @@ export function MessageListItem({
             : undefined
         }
       />
+      {isHuman && !isEditing && createdAtLabel && (
+        <time
+          className="text-muted-foreground/70 self-end px-1 text-[11px] tabular-nums"
+          data-testid="message-timestamp"
+          dateTime={createdAt}
+        >
+          {createdAtLabel}
+        </time>
+      )}
       {!isLoading && showCopyButton && (
         <MessageToolbar
           className={cn(

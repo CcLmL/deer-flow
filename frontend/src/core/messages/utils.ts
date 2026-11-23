@@ -454,6 +454,59 @@ export function getMessageCopyData(message: Message) {
   return extractReasoningContentFromMessage(message) ?? "";
 }
 
+/**
+ * A display message may carry the owning run-event timestamp as a top-level
+ * `created_at` property. It is added by the thread-history adapter and by the
+ * optimistic-send path; it is not part of the LangChain message contract and
+ * is never sent back to the backend.
+ */
+export type MessageWithCreatedAt = Message & { created_at?: string };
+
+export function getMessageCreatedAt(message: Message): string | undefined {
+  const value = (message as MessageWithCreatedAt).created_at;
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+/**
+ * Stamp a client-side send time onto the latest visible human message when the
+ * backend copy has arrived without its persisted `created_at` yet.
+ *
+ * The live checkpoint message replaces the optimistic copy by content identity,
+ * but its id changes, so the optimistic timestamp cannot be matched directly.
+ * Only the newest visible human message can belong to the send in flight; every
+ * older persisted turn receives its timestamp from thread history.
+ */
+export function stampLatestHumanMessageCreatedAt(
+  messages: Message[],
+  createdAt: string | null | undefined,
+): Message[] {
+  if (!createdAt) {
+    return messages;
+  }
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (
+      !message ||
+      message.type !== "human" ||
+      isHiddenFromUIMessage(message)
+    ) {
+      continue;
+    }
+    if (getMessageCreatedAt(message)) {
+      return messages;
+    }
+    const next = messages.slice();
+    next[index] = {
+      ...message,
+      created_at: createdAt,
+    } as MessageWithCreatedAt;
+    return next;
+  }
+
+  return messages;
+}
+
 export function extractTextFromMessage(message: Message) {
   if (typeof message.content === "string") {
     return (

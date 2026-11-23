@@ -1,6 +1,6 @@
 ---
 name: officecli
-description: "Create, read, edit, validate, and translate native Office documents offline with the bundled OfficeCLI binary: PowerPoint (.pptx), Word (.docx), and Excel (.xlsx). Use for 做PPT, 做汇报, 生成演示文稿, 生成汇报材料, 写报告, 生成Word, 整理成文档, 做表格, Excel, 数据分析表, 套用模板, 修改现有Office文件, 按原格式翻译, or extracting text and tables from an uploaded Office file. Produces editable files (not slide images) with native tables, charts, formulas, comments, and tracked changes. Do NOT use for image-only decks, legacy .doc/.xls/.ppt, PDF, or plain text; this environment has no image generation and no network."
+description: "Create, read, edit, validate, and translate native Office documents offline with the bundled OfficeCLI binary: PowerPoint (.pptx), Word (.docx), and Excel (.xlsx). Use for 做PPT, 做汇报, 生成演示文稿, 生成汇报材料, 写报告, 生成Word, 整理成文档, 做表格, Excel, 数据分析表, 套用模板, 修改现有Office文件, 按原格式翻译, or extracting text and tables from an uploaded Office file. Produces editable files (not slide images) with native tables, charts, formulas, comments, and tracked changes. Do NOT use for image-only decks, legacy .doc/.xls/.ppt, PDF, or plain text; this environment has no image generation and no network. 用户已给出文件类型但未给内容素材时，直接用示例内容生成并在交付时注明，不要为“主题是什么”追问一轮。"
 license: Apache-2.0
 version: 1.0.157
 ---
@@ -32,6 +32,22 @@ If `office-documents` or `ppt-generation` is also installed, prefer this skill
 for all Office work. `office-documents` is superseded; `ppt-generation` is
 image-only and cannot run in the intranet.
 
+## Missing content: generate a complete demo, do not ask
+
+When the user has already specified the artifact (PPT/Word/Excel) but not the
+actual content, produce a complete, editable file with clearly marked sample
+content in one pass. Do not spend a clarification round on "what is the topic".
+
+- Use a plausible sample (a named demo company, realistic numbers, etc.) and
+  state in the delivery that the content is sample material to be replaced.
+  Never use `TODO`, `TBD`, `待补充`, or empty placeholders.
+- Ask one combined question only when: the user says they will provide the
+  material; or the file will be submitted externally and must use real data.
+  In that single question, cover topic + material + delivery parameters, and
+  make "用示例内容生成" the first option.
+- This rule applies to document generation. Data-query tasks keep their own
+  clarification rules (see the internal-data SOP / SOUL).
+
 ## Environment facts — do not probe
 
 - Binary: `/mnt/skills/public/officecli/bin/officecli` (Linux x64, glibc,
@@ -55,7 +71,8 @@ image-only and cannot run in the intranet.
 - Do not use `install`, `skills`, `plugins`, `mcp`, `watch`, `goto`, `mark`,
   `refresh`, or `view pdf`. They need network, a Word backend, or an exporter
   plugin, or are irrelevant here. `view screenshot` is optional and may fail
-  without a browser; try it at most once.
+  without a browser; try it at most once. `view svg` is also optional and can
+  hang on larger decks; run it only under `timeout 60s`, at most once.
 - No network: use only local files. Avoid features that fetch remote assets
   (KaTeX/LaTeX, Mermaid, 3D, remote image URLs); they fail or render
   incompletely offline.
@@ -115,6 +132,11 @@ internal reports.
 ## Workflow
 
 ### A. Create a new file (most common)
+
+0. **Route first:** generate PPTX decks with `create` by default. Use the
+   built-in template (section E) only when the user explicitly asks for it
+   (e.g. "用模板" / "用公司模板") or supplies their own template file.
+   For DOCX/XLSX, start from `create` as below.
 
 1. Plan briefly: for a deck, one line per slide (title + 3–6 points, or one
    table/chart); for a document, headings + paragraphs/tables; for a sheet,
@@ -180,6 +202,47 @@ and layout. Do not rebuild the file from scratch.
    not clip content. Verify tables and headings separately.
 5. Do not translate formulas, code, IDs, file paths, or proper names unless the
    user asks. Do not translate text in images (OfficeCLI cannot OCR them).
+
+### E. Templates
+
+**Built-in template (opt-in — only when the user asks):**
+
+`templates/brand-report-4p.pptx` (read its `templates/TEMPLATE.md` first) — a
+layout-only 3-page 16:9 deck: cover, content page, closing slide. **Do not use
+it by default**: generate decks with `create` (workflow A) unless the user
+explicitly asks for the company template (e.g. "用模板") or uploads their own.
+All content boxes are empty; only layout labels remain. There is **no TOC
+page** — build one from the recipe in `templates/TEMPLATE.md` only when the
+user asks for it. Write every text explicitly, per the per-shape style
+recipes.
+
+1. Copy the template to the workspace; never edit the original.
+2. Base pages have **fixed shape paths** (`/slide[1]/shape[@id=9]` cover title,
+   `/slide[2]/shape[@id=3]` title, `/slide[2]/shape[@id=49]` body — see
+   `templates/TEMPLATE.md` address book): write directly, no `get` probing.
+   Always set explicit `font`/`size`/`color`; `\n` splits paragraphs.
+   **Title placeholders (`ph=title`) are lossy in batch:** a `set` on them in
+   the same batch as the page body reports success but the text is dropped on
+   save. Write page titles **last**, one standalone `set` per title, then
+   confirm with `view text` that each page's first line is its title.
+3. Grow decks by cloning the content slide:
+   `add "$OUT" / --from '/slide[2]'` copies a slide with all cross-part
+   relationships; clone all needed pages in one go, then `move` them before the
+   closing slide. **Cloned pages get new `@id`s — use the paths echoed by
+   `add --from`, never the base page's `@id`s**, and fill clones in one batch.
+4. Use `--best-effort` for text-fill batches (independent items; one bad path
+   must not roll back the whole batch). Keep atomic for structural batches.
+5. Keep the closing slide last. Before delivery, `view "$OUT" text` and verify
+   every page carries the text it needs (no empty cloned pages).
+
+**Operator-provided templates (`/mnt/templates`):**
+
+Some deployments also mount a template library read-only at
+`/mnt/templates/<name>/` (a file plus a `TEMPLATE.md`). If present, it takes
+priority over the built-in template when it fits the request. Same rules:
+read the folder's `TEMPLATE.md`, copy to workspace, replace via
+`--find/--replace` on exact paths, clone content pages, keep the closing slide
+last.
 
 ## Verified quick starts
 
@@ -369,12 +432,16 @@ Do not deliver a skeleton. Apply these minimums.
 4. `view stats` — check empty paragraphs, body-paragraph font leakage,
    pictures without alt text, and Excel error cells. Table-cell fonts are not
    counted; spot-check them with `get`.
-5. Visual check: try
-   `$OCLI view "$OUT" screenshot --page N -o /mnt/user-data/workspace/preview.png`
+5. Visual check (optional): try
+   `timeout 60s $OCLI view "$OUT" screenshot --page N -o /mnt/user-data/workspace/preview.png`
    once, then `view_image` the PNG. If it fails (no browser), redirect
-   `view html` to a file and inspect the text/geometry, or use `view svg` for
-   PPTX. Use an absolute output path for the screenshot. These are structural
-   checks, not pixel-perfect proof. Do not install a browser.
+   `view html` to a file and inspect the text/geometry. For PPTX, `view svg` is
+   optional and can be slow; run it at most once under a hard timeout:
+   `timeout 60s $OCLI view "$OUT" svg -o /mnt/user-data/workspace/deck.svg`.
+   If it times out or fails, **skip it and continue** with `view text` /
+   `view issues` / `view stats` — do not retry, and do not let rendering block
+   delivery. Use an absolute output path for the screenshot. These are
+   structural checks, not pixel-perfect proof. Do not install a browser.
 6. `save` / `close` (safe no-ops with no-resident).
 7. Deliver, and note that the file was structure/content checked and should be
    opened once in Office/WPS for final visual confirmation.
@@ -393,7 +460,8 @@ deliver the best valid file and state the limitation instead of looping.
 | `file_locked` | Another process holds it. Copy to a new filename; the wrapper uses no-resident, so this is rare. |
 | `Invalid path index '@phType=...'` | 1.0.157 does not support that selector. Use `/slide[N]/shape[1]` or the `@id` path from `get`. |
 | `Property ... not supported` | Run `officecli help <format> <element>` and use the documented name; do not guess. |
-| `view screenshot` fails | No browser or Playwright. Fall back to `view html`/`view svg`; do not install a browser. |
+| `view screenshot` fails | No browser or Playwright. Fall back to `view html`; do not install a browser. |
+| `view svg` times out / hangs | Rendering is optional. It may exceed the command timeout on large decks. Skip it and continue with `view text` / `view issues` / `view stats`; do not retry or wait again. |
 | `view html` floods the reply | It prints full HTML to stdout. Redirect to a file, then inspect the file; never dump it into chat. |
 | Chinese looks garbled | Write batch JSON as UTF-8 and read output as UTF-8; avoid console code pages. In Linux this is usually already correct. |
 | `refresh` fails | It needs Word on Windows. Do not use it offline; tell the user fields update in Word. |
@@ -425,5 +493,6 @@ deliver the best valid file and state the limitation instead of looping.
 - **Trust:** do not run `install`, `plugins`, `mcp`, `skills`, `watch`, or any
   command that fetches/updates code. The binary is pinned by SHA-256 in the
   wrapper; do not replace it.
-- **Company templates:** use the user's uploaded template. Do not copy company
-  templates into the skill or repo.
+- **Templates:** use the built-in `templates/` when it fits, or the user's
+  uploaded template. Do not copy third-party/customer templates into the skill
+  or repo.

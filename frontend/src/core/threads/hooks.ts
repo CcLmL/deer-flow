@@ -22,9 +22,11 @@ import { useI18n } from "../i18n/hooks";
 import type { MessageWithFeedback } from "../messages/feedback";
 import { getMessageRunId } from "../messages/run-duration";
 import {
+  getMessageCreatedAt,
   hasContent,
   hasToolCalls,
   isHiddenFromUIMessage,
+  stampLatestHumanMessageCreatedAt,
 } from "../messages/utils";
 import type { FileInMessage } from "../messages/utils";
 import type { LocalSettings } from "../settings";
@@ -316,6 +318,10 @@ export function buildVisibleHistoryMessages(
     ...visibleRows.map((message) => ({
       ...message.content,
       run_id: message.run_id,
+      // The run event's timestamp is the only persisted source for a message's
+      // display date/time. Carrying it on the content message lets it survive
+      // the history → live-checkpoint reconciliation in mergeMessages below.
+      ...(message.created_at ? { created_at: message.created_at } : {}),
       ...(message.feedback !== undefined ? { feedback: message.feedback } : {}),
     })),
   ]);
@@ -476,6 +482,7 @@ export function mergeMessages(
   const savedTurnDurations = new Map<string, number>();
   const savedRunIds = new Map<string, string>();
   const savedFeedbacks = new Map<string, FeedbackData | null>();
+  const savedCreatedAts = new Map<string, string>();
   for (const msg of historyMessages) {
     const identity = messageIdentity(msg);
     const runId = getMessageRunId(msg);
@@ -491,6 +498,10 @@ export function mergeMessages(
     const feedback = (msg as MessageWithFeedback).feedback;
     if (identity && feedback !== undefined) {
       savedFeedbacks.set(identity, feedback);
+    }
+    const createdAt = getMessageCreatedAt(msg);
+    if (identity && createdAt) {
+      savedCreatedAts.set(identity, createdAt);
     }
   }
 
@@ -591,16 +602,22 @@ export function mergeMessages(
     const shouldRestoreFeedback =
       savedFeedbacks.has(identity) &&
       (message as MessageWithFeedback).feedback === undefined;
+    const shouldRestoreCreatedAt =
+      savedCreatedAts.has(identity) && !getMessageCreatedAt(message);
     if (
       shouldRestoreRunId ||
       shouldRestoreTurnDuration ||
-      shouldRestoreFeedback
+      shouldRestoreFeedback ||
+      shouldRestoreCreatedAt
     ) {
       return {
         ...message,
         ...(shouldRestoreRunId ? { run_id: savedRunIds.get(identity) } : {}),
         ...(shouldRestoreFeedback
           ? { feedback: savedFeedbacks.get(identity) }
+          : {}),
+        ...(shouldRestoreCreatedAt
+          ? { created_at: savedCreatedAts.get(identity) }
           : {}),
         ...(shouldRestoreTurnDuration
           ? {
@@ -1860,6 +1877,7 @@ export function useThreadStream({
       setOptimisticMessages([]);
       setOptimisticThreadId(null);
       setLiveMessagesThreadId(null);
+      pendingHumanCreatedAtRef.current = null;
       pendingPreparedReplayRef.current = null;
       setPendingSupersededRunIds(new Set());
       setPendingSupersededMessageIds(new Set());
@@ -1972,6 +1990,16 @@ export function useThreadStream({
   // from "messages-tuple" events arrive before the input human message from
   // "values" events).
   const prevHumanMsgCountRef = useRef(humanMessageCount);
+  // Client send time for the in-flight turn. The live checkpoint copy of the
+  // user message replaces the optimistic one before thread history is
+  // refetched, and only history carries the persisted run-event timestamp;
+  // this bridges the gap so the bubble keeps its date/time for the whole run.
+  // The thread id guards against stamping a timestamp from another thread
+  // during navigation.
+  const pendingHumanCreatedAtRef = useRef<{
+    threadId: string;
+    createdAt: string;
+  } | null>(null);
 
   latestMessageCountsRef.current = { humanMessageCount };
   summarizedRef.current ??= new Set<string>();
@@ -1992,6 +2020,7 @@ export function useThreadStream({
     };
     summarizedRef.current = new Set<string>();
     pendingUsageBaselineMessageIdsRef.current = new Set();
+    pendingHumanCreatedAtRef.current = null;
     localTurnOrderBaselineIdentitiesRef.current = null;
     pendingPreparedReplayRef.current = null;
     setPendingSupersededRunIds(new Set());
@@ -2085,6 +2114,8 @@ export function useThreadStream({
       options?.onSent?.();
 
       const text = message.text.trim();
+      const sentAt = new Date().toISOString();
+      pendingHumanCreatedAtRef.current = { threadId, createdAt: sentAt };
 
       // Capture the current human message count before showing optimistic
       // messages so we can wait for the server's copy of the user input.
@@ -2120,7 +2151,8 @@ export function useThreadStream({
           id: `opt-human-${Date.now()}`,
           content: text ? [{ type: "text", text }] : "",
           additional_kwargs: optimisticAdditionalKwargs,
-        });
+          created_at: sentAt,
+        } as Message);
       }
 
       if (optimisticFiles.length > 0 && !hideFromUI) {
@@ -2233,14 +2265,14 @@ export function useThreadStream({
             // subagent's values/messages into the thread view (#4399).
             streamResumable: true,
             config: {
-              recursion_limit: 2500,
+              recursion_limit: 1000,
             },
             context: {
               ...extraContext,
               ...context,
               thinking_enabled: context.mode !== "flash",
               is_plan_mode: context.mode === "pro" || context.mode === "ultra",
-              subagent_enabled: context.mode !== "flash",
+              subagent_enabled: context.mode === "ultra",
               reasoning_effort:
                 context.reasoning_effort ??
                 (context.mode === "ultra"
@@ -2355,13 +2387,13 @@ export function useThreadStream({
           // No streamSubgraphs — same contract as the main submit path (#4399).
           streamResumable: true,
           config: {
-            recursion_limit: 2500,
+            recursion_limit: 1000,
           },
           context: {
             ...context,
             thinking_enabled: context.mode !== "flash",
             is_plan_mode: context.mode === "pro" || context.mode === "ultra",
-            subagent_enabled: context.mode !== "flash",
+            subagent_enabled: context.mode === "ultra",
             reasoning_effort:
               context.reasoning_effort ??
               (context.mode === "ultra"
@@ -2557,9 +2589,17 @@ export function useThreadStream({
       visibleOptimisticMessages,
     );
     const localTurnOrderBaseline = localTurnOrderBaselineIdentitiesRef.current;
-    return localTurnOrderBaseline === null
-      ? restoreReconnectedTurnMessageOrder(merged)
-      : restoreLocalTurnMessageOrder(merged, localTurnOrderBaseline);
+    const ordered =
+      localTurnOrderBaseline === null
+        ? restoreReconnectedTurnMessageOrder(merged)
+        : restoreLocalTurnMessageOrder(merged, localTurnOrderBaseline);
+    const pendingHumanCreatedAtState = pendingHumanCreatedAtRef.current;
+    const pendingHumanCreatedAt =
+      pendingHumanCreatedAtState &&
+      pendingHumanCreatedAtState.threadId === threadId
+        ? pendingHumanCreatedAtState.createdAt
+        : null;
+    return stampLatestHumanMessageCreatedAt(ordered, pendingHumanCreatedAt);
   }, [
     previouslyRenderedOrder,
     renderMessages,

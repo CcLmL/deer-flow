@@ -172,6 +172,7 @@ services:
       - QA_ACCESS_FILE=/etc/deerflow/access/qa_access.yaml
       - PATHOLOGY_ACCESS_FILE=/etc/deerflow/access/pathology_access.yaml
       - VET_ACCESS_FILE=/etc/deerflow/access/vet_access.yaml
+      - VET_PERFORMANCE_ACCESS_FILE=/etc/deerflow/access/vet_performance_access.yaml
       - K8S_NAMESPACE=deer-flow
       - SANDBOX_IMAGE=docker.io/library/all-in-one-sandbox:1.11.0-duckdb
       # Optional lark-cli init image (Pattern A). Empty ⇒ legacy runtime mount.
